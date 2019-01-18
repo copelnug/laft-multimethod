@@ -70,48 +70,58 @@ namespace laft
 			};
 		}
 
-		/**
-		 * 
-		 * TODO
-		 * 	Handle const overload
-		 * 	Handle multiple methods
-		 * 	Allow some params to not be variadic
-		 */
-		template <typename Self, typename _ReturnType, typename _Arg>
-		class Base
+		namespace impl
 		{
-		public:
-			using ReturnType = _ReturnType;
-			using Arg = _Arg;
-
-			ReturnType dispatch(typename Arg::Key param) {
-				utils::TypeIndex index = param.get_type_index() - 1; // TODO Handle case without this method
-				return _callbacks[index](std::forward<typename Arg::Key>(param));
-			}
-
-			Base() :
-				_callbacks{create_callbacks<typename Arg::Key>(typename Arg::List{})}
+			template <typename Function, typename Common, typename T>
+			auto createCallback() -> typename Function::Call
 			{
-
-			}
-		private:
-			using Call = std::function<ReturnType (typename Arg::Key)>; // TODO Self* should be the first argument. This would allow copy and move easily
-			std::array<Call, Arg::List::Size> _callbacks;
-
-			template <typename Common, typename ...T>
-			std::array<Call, Arg::List::Size> create_callbacks(const utils::TypeList<T...>&)
-			{
-				return {create_callback<Common, T>()...};
-			}
-
-			template <typename Common, typename T>
-			Call create_callback()
-			{
-				return [&](Common param) -> ReturnType {
-					return static_cast<Self*>(this)->handle(reinterpret_cast<const T&>(param)); // TODO Keep ptr/ref and const from common
+				return [](Function function, Common param) -> typename Function::ReturnType {
+					return function.handle(reinterpret_cast<const T&>(param)); // TODO Keep ptr/ref and const from common
 				};
 			}
-		};
+
+			template <typename Function, typename Common, typename ...T>
+			std::array<typename Function::Call, Function::Arg::List::Size> createArray(utils::TypeList<T...>*)
+			{
+				return {createCallback<Function, Common, T>()...};
+			}
+
+			template <typename Function, typename Arg>
+			auto createArray() -> std::array<typename Function::Call, Function::Arg::List::Size>
+			{
+				return createArray<Function, typename Arg::Key>(static_cast<typename Arg::List*>(nullptr));
+			}
+
+			/**
+			 * Allow to get the function array to use for a specified functor.
+			 * \tparam Function Functor object.
+			 * \return Array of function.
+			 * 
+			 * This method primary use is to create the array only once. Then it can be obtained from the static variable
+			 * each time it is needed.
+			 */
+			template <typename Function>
+			auto createArray(const Function&) -> std::array<typename Function::Call, Function::Arg::List::Size>
+			{
+				static const auto array = createArray<Function, typename Function::Arg>();
+				return array;
+			}
+		}
+		/**
+		 * 
+		 * 
+		 * Function should have:
+		 * 	ReturnType
+		 * 	Call : std::function<ReturnType(Function, Function::Arg::Key)
+		 * 	Arg : param::StaticList
+		 */
+		template <typename Function, typename T>
+		auto dispatch(Function function, T&& param) -> typename Function::ReturnType
+		{
+			const auto& array = impl::createArray(function);
+			utils::TypeIndex index = param.get_type_index() - 1; // TODO Handle case without this method
+			return array[index](function, std::forward<typename Function::Arg::Key>(param));
+		}
 	}
 }
 
@@ -138,9 +148,11 @@ struct Triangle : laft::Extend<Form, Triangle>
 {};
 
 using Arg1 = laft::multimethod::param::StaticList<const Form&, Circle, Rectangle, Triangle>;
-struct Printer : laft::multimethod::Base<Printer, std::string, Arg1>
+struct Printer
 {
-	using Base<Printer, std::string, Arg1>::Base;
+	using ReturnType = std::string;
+	using Call = std::function<std::string(const Printer&, const Form&)>;
+	using Arg = Arg1;
 
 	std::string handle(const Circle& circle)
 	{
@@ -166,9 +178,10 @@ int main()
 	std::cout << "(char, int) => " << laft::utils::get_subtype_index<char, int>() << std::endl;
 	std::cout << "(char, int) => " << laft::utils::get_subtype_index<char, int>() << std::endl;
 
-	std::cout << "Result: " << Printer{}.dispatch(Circle{"test1"}) << std::endl;
-	std::cout << "Result: " << Printer{}.dispatch(Rectangle{"test2"}) << std::endl;
-	std::cout << "Result: " << Printer{}.dispatch(Triangle{"test3"}) << std::endl;
+	using laft::multimethod::dispatch;
+	std::cout << "Result: " << dispatch(Printer{}, Circle{"test1"}) << std::endl;
+	std::cout << "Result: " << dispatch(Printer{}, Rectangle{"test2"}) << std::endl;
+	std::cout << "Result: " << dispatch(Printer{}, Triangle{"test3"}) << std::endl;
 
 	return 0;
 }
