@@ -24,9 +24,23 @@ namespace laft
 		}
 
 		template <typename ...T>
+		struct TypeCount;
+
+		template <typename T, typename ...U>
+		struct TypeCount<T, U...>
+		{
+			constexpr const static unsigned int Size = TypeCount<U...>::Size + 1;
+		};
+		template <>
+		struct TypeCount<>
+		{
+			constexpr const static unsigned int Size = 0;
+		};
+
+		template <typename ...T>
 		struct TypeList
 		{
-			static constexpr const unsigned int Size = 3; // TODO Make 
+			static constexpr const unsigned int Size = TypeCount<T...>::Size;
 		};
 	}
 
