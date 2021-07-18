@@ -1,6 +1,8 @@
 #include <array>
+#include <cstdlib>
 #include <functional>
 #include <iostream>
+#include <sys/types.h>
 
 namespace laft
 {
@@ -61,16 +63,32 @@ namespace laft
 		utils::TypeIndex _typeIndex{0};
 	};
 
-	template <typename Base, typename Self>
-	struct Extend : public Base
+	namespace Impl
 	{
-		template <typename ...T>
-		Extend(T&&... args) :
-			Base(std::forward<T>(args)...) // TODO Validate constructible
+		/*
+			\brief This class is simply a way to append operations to all constructors.
+
+			Extending it simply allow to register the type in all constructors.
+		*/
+		template <typename Base, typename Self>
+		struct ExtendTypeRegister
 		{
-			Base::set_type_index(utils::get_subtype_index<Base, Self>());
-		}
+			ExtendTypeRegister();
+		};
+	}
+
+	template <typename Base, typename Self>
+	struct Extend : public Base, private Impl::ExtendTypeRegister<Base,Self>
+	{
+		using Base::Base;
+
+		friend Impl::ExtendTypeRegister<Base,Self>;
 	};
+	template <typename Base, typename Self>
+	Impl::ExtendTypeRegister<Base,Self>::ExtendTypeRegister()
+	{
+		static_cast<Extend<Base,Self>&>(*this).Base::set_type_index(utils::get_subtype_index<Base, Self>());
+	}
 
 	namespace multimethod
 	{
@@ -134,6 +152,7 @@ namespace laft
 		{
 			const auto& array = impl::createArray(function);
 			utils::TypeIndex index = param.get_type_index() - 1; // TODO Handle case without this method
+			// TODO Throw exception if get_type_index() returns 0. It means the object is not done initializing.
 			return array[index](function, std::forward<typename Function::Arg::Key>(param));
 		}
 	}
@@ -155,11 +174,17 @@ struct Triangle;
 
 
 struct Circle : laft::Extend<Form, Circle>
-{};
+{
+	using Extend<Form,Circle>::Extend;
+};
 struct Rectangle : laft::Extend<Form, Rectangle> // TODO How to ensure the same type is not called twice?
-{};
+{
+	using Extend<Form,Rectangle>::Extend;
+};
 struct Triangle : laft::Extend<Form, Triangle>
-{};
+{
+	using Extend<Form,Triangle>::Extend;
+};
 
 using Arg1 = laft::multimethod::param::StaticList<const Form&, Circle, Rectangle, Triangle>;
 struct Printer
@@ -191,6 +216,10 @@ int main()
 	std::cout << "(char, short) => " << laft::utils::get_subtype_index<char, short>() << std::endl;
 	std::cout << "(char, int) => " << laft::utils::get_subtype_index<char, int>() << std::endl;
 	std::cout << "(char, int) => " << laft::utils::get_subtype_index<char, int>() << std::endl;
+
+	std::cout << "Circle => " << laft::utils::get_subtype_index<Form, Circle>() << std::endl;
+	std::cout << "Rectangle => " << laft::utils::get_subtype_index<Form, Rectangle>() << std::endl;
+	std::cout << "Triangle => " << laft::utils::get_subtype_index<Form, Triangle>() << std::endl;
 
 	using laft::multimethod::dispatch;
 	std::cout << "Result: " << dispatch(Printer{}, Circle{"test1"}) << std::endl;
