@@ -43,6 +43,9 @@ namespace laft
 		struct TypeList
 		{
 			static constexpr const unsigned int Size = TypeCount<T...>::Size;
+
+			template <typename U>
+			using Append = TypeList<T...,U>;
 		};
 	}
 
@@ -77,6 +80,14 @@ namespace laft
 		};
 	}
 
+	/**
+		@brief 
+
+		We use Impl::ExtendTypeRegister to basically append the registering to any
+		base constructor. As we inherit from it after Base, the constructor of
+		ExtenderTypeRegister will be executed after ANY constructor from base. Thus
+		allowing to inherit base constructors AND always register the type.
+	*/
 	template <typename Base, typename Self>
 	struct Extend : public Base, private Impl::ExtendTypeRegister<Base,Self>
 	{
@@ -104,39 +115,107 @@ namespace laft
 
 		namespace impl
 		{
-			template <typename Function, typename Common, typename T>
-			auto createCallback() -> typename Function::Call
+			template <typename Common, typename T>
+			struct TypeCast
 			{
-				return [](Function function, Common param) -> typename Function::ReturnType {
-					return function.handle(reinterpret_cast<const T&>(param)); // TODO Keep ptr/ref and const from common
+				using Arg = Common;
+
+				TypeCast(Common param) : param_{std::forward<Common>(param)} {}
+
+				const T& cast() { return reinterpret_cast<const T&>(std::forward<Common>(param_)); }
+				Common param_;
+			};
+
+			template <typename Function, typename ...Receiving, typename ...T>
+			auto createCallback(Function*, utils::TypeList<Receiving...>*, utils::TypeList<T...>* t)
+				-> std::function< typename Function::ReturnType(const Function&, Receiving...) >
+			{
+				// We create an inside lambda that take T and then call it with the parameters and use default constructor of T for conversion.
+				return [](const Function& function, Receiving&&... params) -> typename Function::ReturnType {
+					return [](const Function& function, T&&... ts) -> typename Function::ReturnType {
+						return function.handle(ts.cast()...); // TODO Keep ptr/ref and const from common
+					}(function, params...);
 				};
 			}
-
-			template <typename Function, typename Common, typename ...T>
-			std::array<typename Function::Call, Function::Arg::List::Size> createArray(utils::TypeList<T...>*)
+			
+			template <typename Function, typename ...Receiving, typename ...Processed>
+			auto createHelper(Function* f, utils::TypeList<Receiving...>* receiving, utils::TypeList<Processed...>* processed, utils::TypeList<>*)
 			{
-				return {createCallback<Function, Common, T>()...};
+				return createCallback(f, receiving, processed);
+			}
+			template <typename Function, typename ...Receiving, typename ...Processed, typename Common, typename ...T, typename ...U>
+			auto createHelper(Function* f, utils::TypeList<Receiving...>*, utils::TypeList<Processed...>*, utils::TypeList<param::StaticList<const Common&, T...>, U...>* u) // TODO Better overload support?
+			{
+				return std::array{
+					createHelper(
+						f,
+						static_cast<utils::TypeList<Receiving..., Common>*>(nullptr),
+						static_cast<utils::TypeList<Processed..., TypeCast<const Common&,T>>*>(nullptr),
+						static_cast<utils::TypeList<U...>*>(nullptr)
+					)...
+				};
+			}
+			/*template <typename Function, typename ...Processed, typename T, typename ...U>
+			auto createHelper(Function* f, utils::TypeList<Processed...>*, T*, U*... u)
+			{
+				return createHelper(
+					f,
+					static_cast<utils::TypeList<Processed..., TypeCast<T,T>>*>(nullptr),
+					u...
+				);
+			}*/
+
+			template <typename Function, typename ...T>
+			auto createHelperWrapper(Function* f, laft::utils::TypeList<T...>* t)
+			{
+				return createHelper(
+					f,
+					static_cast<utils::TypeList<>*>(nullptr),
+					static_cast<utils::TypeList<>*>(nullptr),
+					t
+				);
 			}
 
-			template <typename Function, typename Arg>
-			auto createArray() -> std::array<typename Function::Call, Function::Arg::List::Size>
-			{
-				return createArray<Function, typename Arg::Key>(static_cast<typename Arg::List*>(nullptr));
-			}
-
-			/**
-			 * Allow to get the function array to use for a specified functor.
-			 * \tparam Function Functor object.
-			 * \return Array of function.
-			 * 
-			 * This method primary use is to create the array only once. Then it can be obtained from the static variable
-			 * each time it is needed.
-			 */
 			template <typename Function>
-			auto createArray(const Function&) -> std::array<typename Function::Call, Function::Arg::List::Size>
+			auto createArray()
 			{
-				static const auto array = createArray<Function, typename Function::Arg>();
+				// Store in static variable to only build once per Function type.
+				static const auto array = createHelperWrapper(static_cast<Function*>(nullptr), static_cast<typename Function::ArgList*>(nullptr));
 				return array;
+			}
+
+			/*template <typename Array, typename T>
+			auto getArray(const Array& array, T&&)
+			{
+				return array;
+			}*/
+			template <typename T, long unsigned int N>
+			auto getArray(const std::array<T,N>& array, const Identifiable& identifiable)
+			{
+				return array[identifiable.get_type_index()-1];// TODO security
+			}
+
+			/*template <typename Array, typename ...T>
+			auto callHelper(const Array& array, T&&... params);*/
+			template <typename Array>
+			auto callHelper(const Array& array)
+			{
+				return array;
+			}
+			template <typename Array, typename T, typename ...U>
+			auto callHelper(const Array& array, T&& p, U&&... others)
+			{
+				return callHelper(
+					getArray(array, p),
+					others...
+				);
+			}
+
+			template <typename Array, typename Function, typename ...T>
+			auto call(const Array& array, const Function& f, T&&... params) -> typename Function::ReturnType
+			{
+				auto func = callHelper(array, params...);
+				return func(f, params...);
 			}
 		}
 		/**
@@ -144,16 +223,13 @@ namespace laft
 		 * 
 		 * Function should have:
 		 * 	ReturnType
-		 * 	Call : std::function<ReturnType(Function, Function::Arg::Key)
-		 * 	Arg : param::StaticList
+		 * 	ArgList
 		 */
-		template <typename Function, typename T>
-		auto dispatch(Function function, T&& param) -> typename Function::ReturnType
+		template <typename Function, typename ...T>
+		auto dispatch(const Function& function, T&&... params) -> typename Function::ReturnType
 		{
-			const auto& array = impl::createArray(function);
-			utils::TypeIndex index = param.get_type_index() - 1; // TODO Handle case without this method
-			// TODO Throw exception if get_type_index() returns 0. It means the object is not done initializing.
-			return array[index](function, std::forward<typename Function::Arg::Key>(param));
+			const auto& array = impl::createArray<Function>();
+			return impl::call(array, function, params...);
 		}
 	}
 }
@@ -186,24 +262,75 @@ struct Triangle : laft::Extend<Form, Triangle>
 	using Extend<Form,Triangle>::Extend;
 };
 
-using Arg1 = laft::multimethod::param::StaticList<const Form&, Circle, Rectangle, Triangle>;
+using AnyForm = laft::multimethod::param::StaticList<const Form&, Circle, Rectangle, Triangle>; // TODO Any way to match the index in there with the get_subtype_index no matter the order? Should be possible to build an array. We may need get_max_index for the size.
 struct Printer
 {
 	using ReturnType = std::string;
 	using Call = std::function<std::string(const Printer&, const Form&)>;
-	using Arg = Arg1;
+	using Arg = AnyForm;
+	using ArgList = laft::utils::TypeList<
+		AnyForm
+	>;
 
-	std::string handle(const Circle& circle)
+	std::string handle(const Circle& circle) const
 	{
 		return "circle";
 	}
-	std::string handle(const Rectangle& circle)
+	std::string handle(const Rectangle& circle) const
 	{
 		return "rectangle";
 	}
-	std::string handle(const Triangle& circle)
+	std::string handle(const Triangle& circle) const
 	{
 		return "triangle";
+	}
+};
+struct Intersect
+{
+	using ReturnType = std::string;
+	using Call = std::function<std::string(const Intersect&, const Form&, const Form&)>;
+	using ArgList = laft::utils::TypeList<
+		AnyForm,
+		AnyForm
+	>;
+
+	Intersect(Intersect&) = delete;
+
+	std::string handle(const Circle&, const Circle&) const
+	{
+		return "Intersect two circles";
+	}
+	std::string handle(const Circle&, const Rectangle&) const
+	{
+		return "Intersect circle & rectangle";
+	}
+	std::string handle(const Circle&, const Triangle&) const
+	{
+		return "Intersect circle & triangle";
+	}
+	std::string handle(const Rectangle&, const Circle&) const
+	{
+		return "Intersect rectangle & circle";
+	}
+	std::string handle(const Rectangle&, const Rectangle&) const
+	{
+		return "Intersect rectangle & rectangle";
+	}
+	std::string handle(const Rectangle&, const Triangle&) const
+	{
+		return "Intersect rectangle & triangle";
+	}
+	std::string handle(const Triangle&, const Circle&) const
+	{
+		return "Intersect triangle & circle";
+	}
+	std::string handle(const Triangle&, const Rectangle&) const
+	{
+		return "Intersect triangle & rectangle";
+	}
+	std::string handle(const Triangle&, const Triangle&) const
+	{
+		return "Intersect triangle & triangle";
 	}
 };
 
@@ -226,5 +353,10 @@ int main()
 	std::cout << "Result: " << dispatch(Printer{}, Rectangle{"test2"}) << std::endl;
 	std::cout << "Result: " << dispatch(Printer{}, Triangle{"test3"}) << std::endl;
 
+	std::cout << "Result: " << dispatch(Intersect{}, Circle{"Test 1"}, Rectangle{"Test 2"}) << std::endl;
+
+	// TODO
+	//	handle non const reference
+	//	hanled moving in parameters. (rvalue)
 	return 0;
 }
